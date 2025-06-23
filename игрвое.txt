@@ -1,0 +1,252 @@
+{$mode objfpc}{$H+}
+uses
+  raylib, raymath, math, sysutils, generics.collections;
+
+const
+  SCREEN_WIDTH = 1280;
+  SCREEN_HEIGHT = 720;
+  PLAYER_HEIGHT = 1.8;
+  PLAYER_RADIUS = 0.4;
+  GRAVITY = 15.0;
+  JUMP_FORCE = 8.0;
+  CHUNK_SIZE = 16;
+  VIEW_DISTANCE = 3;
+
+type
+  TBlockType = (btAir, btGrass, btStone, btWater);
+  TChunk = record
+    Position: TVector3;
+    Blocks: array[0..CHUNK_SIZE-1, 0..255, 0..CHUNK_SIZE-1] of TBlockType;
+    Mesh: TMesh;
+    Model: TModel;
+    Generated: Boolean;
+  end;
+  PChunk = ^TChunk;
+
+  TPlayer = record
+    Position: TVector3;
+    Velocity: TVector3;
+    OnGround: Boolean;
+    Camera: TCamera;
+  end;
+
+  TChunkManager = class
+  private
+    Chunks: specialize TDictionary<string, PChunk>;
+    function ChunkKey(X, Z: Integer): string;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    function GetChunk(X, Z: Integer): PChunk;
+    procedure GenerateChunk(Chunk: PChunk);
+    procedure UpdateVisibility(Camera: TCamera);
+  end;
+
+var
+  Player: TPlayer;
+  ChunkManager: TChunkManager;
+  Textures: array[TBlockType] of TTexture2D;
+  Shader: TShader;
+  WireframeMode: Boolean = False;
+
+// Хеш-ключ для чанка
+function TChunkManager.ChunkKey(X, Z: Integer): string;
+begin
+  Result := Format('%d:%d', [X, Z]);
+end;
+
+constructor TChunkManager.Create;
+begin
+  Chunks := specialize TDictionary<string, PChunk>.Create;
+end;
+
+destructor TChunkManager.Destroy;
+var
+  Chunk: PChunk;
+begin
+  for Chunk in Chunks.Values do
+  begin
+    UnloadModel(Chunk^.Model);
+    UnloadMesh(Chunk^.Mesh);
+    Dispose(Chunk);
+  end;
+  Chunks.Free;
+  inherited;
+end;
+
+function TChunkManager.GetChunk(X, Z: Integer): PChunk;
+var
+  Key: string;
+begin
+  Key := ChunkKey(X, Z);
+  if not Chunks.TryGetValue(Key, Result) then
+  begin
+    New(Result);
+    Result^.Position := Vector3Create(X * CHUNK_SIZE, 0, Z * CHUNK_SIZE);
+    Result^.Generated := False;
+    Chunks.Add(Key, Result);
+  end;
+end;
+
+procedure TChunkManager.GenerateChunk(Chunk: PChunk);
+var
+  X, Y, Z: Integer;
+  NoiseValue: Single;
+begin
+  if Chunk^.Generated then Exit;
+
+  // Генерация ландшафта (процедурный шум)
+  for X := 0 to CHUNK_SIZE - 1 do
+    for Z := 0 to CHUNK_SIZE - 1 do
+    begin
+      NoiseValue := PerlinNoise(
+        (Chunk^.Position.x + X) * 0.1,
+        (Chunk^.Position.z + Z) * 0.1
+      );
+      Height := Trunc(NoiseValue * 10) + 50;
+
+      for Y := 0 to 255 do
+      begin
+        if Y > Height then
+          Chunk^.Blocks[X, Y, Z] := btAir
+        else if Y = Height then
+          Chunk^.Blocks[X, Y, Z] := btGrass
+        else if Y > Height - 4 then
+          Chunk^.Blocks[X, Y, Z] := btStone
+        else
+          Chunk^.Blocks[X, Y, Z] := btStone;
+      end;
+    end;
+
+  // Генерация меша (оптимизированная)
+  // ... (реализация greedy meshing или подобной оптимизации)
+
+  Chunk^.Generated := True;
+end;
+
+procedure TChunkManager.UpdateVisibility(Camera: TCamera);
+begin
+  // Frustum Culling и LOD система
+  // ... (реализация отсечения невидимых чанков)
+end;
+
+procedure InitGame;
+begin
+  InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, '3D Платформер');
+  SetTargetFPS(60);
+
+  // Инициализация камеры
+  Player.Camera := Camera3DCreate(
+    Vector3Create(0, 2, 0),
+    Vector3Create(0, 0, 0),
+    Vector3Create(0, 1, 0),
+    70, CAMERA_PERSPECTIVE
+  );
+
+  // Загрузка ресурсов
+  Textures[btGrass] := LoadTexture('resources/grass.png');
+  Textures[btStone] := LoadTexture('resources/stone.png');
+  Textures[btWater] := LoadTexture('resources/water.png');
+
+  // Компиляция шейдера
+  Shader := LoadShader(nil, 'resources/lighting.fs');
+end;
+
+procedure UpdatePlayer(dt: Single);
+var
+  MoveVector: TVector3;
+  ChunkX, ChunkZ: Integer;
+begin
+  // Управление персонажем
+  MoveVector := Vector3Zero;
+  if IsKeyDown(KEY_W) then MoveVector.z := 1;
+  if IsKeyDown(KEY_S) then MoveVector.z := -1;
+  if IsKeyDown(KEY_A) then MoveVector.x := -1;
+  if IsKeyDown(KEY_D) then MoveVector.x := 1;
+
+  // Применение гравитации
+  Player.Velocity.y -= GRAVITY * dt;
+
+  // Прыжок
+  if Player.OnGround and IsKeyPressed(KEY_SPACE) then
+    Player.Velocity.y := JUMP_FORCE;
+
+  // Обновление позиции
+  Player.Position := Vector3Add(Player.Position, Vector3Scale(Player.Velocity, dt));
+
+  // Обновление чанков вокруг игрока
+  ChunkX := Trunc(Player.Position.x / CHUNK_SIZE);
+  ChunkZ := Trunc(Player.Position.z / CHUNK_SIZE);
+
+  for X := ChunkX - VIEW_DISTANCE to ChunkX + VIEW_DISTANCE do
+    for Z := ChunkZ - VIEW_DISTANCE to ChunkZ + VIEW_DISTANCE do
+      ChunkManager.GenerateChunk(ChunkManager.GetChunk(X, Z));
+
+  // Обновление камеры
+  Player.Camera.position := Player.Position;
+  Player.Camera.position.y += PLAYER_HEIGHT - PLAYER_RADIUS;
+  Player.Camera.target := Vector3Add(Player.Camera.position, 
+    Vector3Create(0, 0, 1)); // Направление взгляда
+end;
+
+procedure DrawWorld;
+var
+  Chunk: PChunk;
+begin
+  BeginMode3D(Player.Camera);
+
+  // Рендер чанков
+  for Chunk in ChunkManager.Chunks.Values do
+  begin
+    if Chunk^.Generated then
+      DrawModel(Chunk^.Model, Chunk^.Position, 1.0, WHITE);
+  end;
+
+  // Дебаг-отрисовка коллизий
+  if WireframeMode then
+  begin
+    DrawGrid(100, 1.0);
+    DrawBoundingBox(BoundingBoxCreate(
+      Vector3Create(
+        Player.Position.x - PLAYER_RADIUS,
+        Player.Position.y,
+        Player.Position.z - PLAYER_RADIUS
+      ),
+      Vector3Create(
+        Player.Position.x + PLAYER_RADIUS,
+        Player.Position.y + PLAYER_HEIGHT,
+        Player.Position.z + PLAYER_RADIUS
+      )
+    ), GREEN);
+  end;
+
+  EndMode3D();
+end;
+
+begin
+  ChunkManager := TChunkManager.Create;
+  InitGame;
+
+  try
+    while not WindowShouldClose do
+    begin
+      // Обновление
+      UpdatePlayer(GetFrameTime());
+
+      // Переключение режима отладки
+      if IsKeyPressed(KEY_F1) then
+        WireframeMode := not WireframeMode;
+
+      // Рендер
+      BeginDrawing();
+        ClearBackground(SKYBLUE);
+        DrawWorld();
+        DrawFPS(10, 10);
+        DrawText('3D Платформер (F1 - режим отладки)', 10, 40, 20, DARKGRAY);
+      EndDrawing();
+    end;
+  finally
+    ChunkManager.Free;
+    CloseWindow();
+  end;
+end.
